@@ -451,27 +451,31 @@ async def main():
     print(f"Loaded: {len(messages_cache)} msgs, {len(ALLOWED_IDS)} allowed")
 
     accounts = [
-        (SESSION_1, API_ID_1, API_HASH_1),
-        (SESSION_2, API_ID_2, API_HASH_2),
-        (SESSION_3, API_ID_3, API_HASH_3),
-        (SESSION_4, API_ID_4, API_HASH_4),
-        (SESSION_5, API_ID_5, API_HASH_5),
-        (SESSION_6, API_ID_6, API_HASH_6)
+        (SESSION_1, API_ID_1, API_HASH_1, "Account 1"),
+        (SESSION_2, API_ID_2, API_HASH_2, "Account 2"),
+        (SESSION_3, API_ID_3, API_HASH_3, "Account 3"),
+        (SESSION_4, API_ID_4, API_HASH_4, "Account 4"),
+        (SESSION_5, API_ID_5, API_HASH_5, "Account 5"),
+        (SESSION_6, API_ID_6, API_HASH_6, "Account 6")
     ]
 
-    for i, (session_str, api_id, api_hash) in enumerate(accounts, 1):
+    for session_str, api_id, api_hash, acc_name in accounts:
         if not session_str:
-            print(f"❌ Session {i} not found in Environment Variables. Skipping...")
+            print(f"❌ {acc_name}: Session String Not Found in Environment Variables.")
             continue
         try:
+            print(f"⏳ Trying to start {acc_name}...")
             client = TelegramClient(StringSession(session_str), api_id, api_hash)
             await client.start()
                 
             clients.append(client)
             me = await client.get_me()
-            print(f"✅ Account {i} → {me.first_name}")
+            print(f"✅ {acc_name} → {me.first_name}")
+            
+            # အကောင့်တွေကြား တစ်စက္ကန့် ခြားပါ (Flood မမိအောင်)
+            await asyncio.sleep(1)
         except Exception as e:
-            print(f"❌ Account {i} fail: {e}")
+            print(f"❌ {acc_name} fail: {e}")
 
     bot_client = TelegramClient("bot_session", API_ID_1, API_HASH_1)
     await bot_client.start(bot_token=BOT_TOKEN)
