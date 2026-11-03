@@ -4,6 +4,7 @@ import re
 import os
 from aiohttp import web
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.errors import (
     UserAlreadyParticipantError,
     FloodWaitError,
@@ -14,40 +15,31 @@ from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 
 # ============================================================
-# ၁။ Configuration (Account ခြောက်ခုစလုံးအတွက်)
+# ၁။ Configuration (Render Variables ကနေ ယူမယ်)
 # ============================================================
 API_ID_1 = 38856868                              
 API_HASH_1 = "c221d599cacd92804e4d3abcdf756086"  
-SESSION_1 = "session1"
-PHONE_1 = "+959779409453"
-
 API_ID_2 = 38382066
 API_HASH_2 = "2405f7c95c3b4219ade9dfe44b14126f"
-SESSION_2 = "session2"
-PHONE_2 = "+959753434745"  
-
 API_ID_3 = 37768961
 API_HASH_3 = "aff7aa655b12d652ab82efce9f727b40"
-SESSION_3 = "session3"
-PHONE_3 = "+959773212806"  
-
 API_ID_4 = 37963093
 API_HASH_4 = "bb4fd1384a8f093f494ac4e9a43509c4"
-SESSION_4 = "session4"
-PHONE_4 = "+959652319318"  
-
 API_ID_5 = 33616471
 API_HASH_5 = "d2f27dc99d707c88e49c8cf4b97f285e"
-SESSION_5 = "session5"
-PHONE_5 = "+959774676470"
-
 API_ID_6 = 38031634
 API_HASH_6 = "67a76ddf77488863acc56d7335d5d1e6"
-SESSION_6 = "session6"
-PHONE_6 = "+959673538542"
 
 BOT_TOKEN = "9037455170:AAGJhRwOQZfuxVIlPbkMa6nvUCDlK1mckQI"
 OWNER_ID = 8524222225                          
+
+# Render Environment Variables ကနေ Session String တွေကို ယူမယ်
+SESSION_1 = os.environ.get("SESSION_1")
+SESSION_2 = os.environ.get("SESSION_2")
+SESSION_3 = os.environ.get("SESSION_3")
+SESSION_4 = os.environ.get("SESSION_4")
+SESSION_5 = os.environ.get("SESSION_5")
+SESSION_6 = os.environ.get("SESSION_6")
 
 # ============================================================
 # ၂။ Global State
@@ -429,7 +421,7 @@ async def start_spamming(chat_id, target_id, target_name):
         is_sending = False
 
 # ============================================================
-# ၈။ Web Server (Render အတွက် မဖြစ်မနေ လိုအပ်သည်)
+# ၈။ Web Server (Render အတွက်)
 # ============================================================
 async def handle(request):
     return web.Response(text="Bot is running!")
@@ -439,7 +431,6 @@ async def start_web_server():
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Render က Port ကို Environment Variable အနေနဲ့ ပေးတတ်တယ်
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
@@ -451,7 +442,6 @@ async def start_web_server():
 async def main():
     global bot_client
 
-    # Web Server ကို အရင် Run ပါ (Render က Port ဖွင့်ထားမှ လက်ခံမှာမို့)
     await start_web_server()
 
     await init_db()
@@ -461,27 +451,27 @@ async def main():
     print(f"Loaded: {len(messages_cache)} msgs, {len(ALLOWED_IDS)} allowed")
 
     accounts = [
-        (SESSION_1, API_ID_1, API_HASH_1, PHONE_1),
-        (SESSION_2, API_ID_2, API_HASH_2, PHONE_2),
-        (SESSION_3, API_ID_3, API_HASH_3, PHONE_3),
-        (SESSION_4, API_ID_4, API_HASH_4, PHONE_4),
-        (SESSION_5, API_ID_5, API_HASH_5, PHONE_5),
-        (SESSION_6, API_ID_6, API_HASH_6, PHONE_6)
+        (SESSION_1, API_ID_1, API_HASH_1),
+        (SESSION_2, API_ID_2, API_HASH_2),
+        (SESSION_3, API_ID_3, API_HASH_3),
+        (SESSION_4, API_ID_4, API_HASH_4),
+        (SESSION_5, API_ID_5, API_HASH_5),
+        (SESSION_6, API_ID_6, API_HASH_6)
     ]
 
-    for session, api_id, api_hash, phone in accounts:
+    for i, (session_str, api_id, api_hash) in enumerate(accounts, 1):
+        if not session_str:
+            print(f"❌ Session {i} not found in Environment Variables. Skipping...")
+            continue
         try:
-            client = TelegramClient(session, api_id, api_hash)
-            if phone:
-                await client.start(phone=phone)
-            else:
-                await client.start()
+            client = TelegramClient(StringSession(session_str), api_id, api_hash)
+            await client.start()
                 
             clients.append(client)
             me = await client.get_me()
-            print(f"✅ {session} → {me.first_name}")
+            print(f"✅ Account {i} → {me.first_name}")
         except Exception as e:
-            print(f"❌ {session} fail: {e}")
+            print(f"❌ Account {i} fail: {e}")
 
     bot_client = TelegramClient("bot_session", API_ID_1, API_HASH_1)
     await bot_client.start(bot_token=BOT_TOKEN)
