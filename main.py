@@ -1,491 +1,255 @@
-import asyncio
-import aiosqlite
-import re
-import os
-from aiohttp import web
-from telethon import TelegramClient, events
-from telethon.sessions import StringSession
-from telethon.errors import (
-    UserAlreadyParticipantError,
-    FloodWaitError,
-    InviteHashExpiredError,
-    InviteHashInvalidError,
-)
-from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.messages import ImportChatInviteRequest
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+import sqlite3
+from datetime import datetime
+import time
 
-# ============================================================
-# ၁။ Configuration (Render Variables ကနေ ယူမယ်)
-# ============================================================
-API_ID_1 = 38856868                              
-API_HASH_1 = "c221d599cacd92804e4d3abcdf756086"  
-API_ID_2 = 38382066
-API_HASH_2 = "2405f7c95c3b4219ade9dfe44b14126f"
-API_ID_3 = 37768961
-API_HASH_3 = "aff7aa655b12d652ab82efce9f727b40"
-API_ID_4 = 37963093
-API_HASH_4 = "bb4fd1384a8f093f494ac4e9a43509c4"
-API_ID_5 = 33616471
-API_HASH_5 = "d2f27dc99d707c88e49c8cf4b97f285e"
-API_ID_6 = 38031634
-API_HASH_6 = "67a76ddf77488863acc56d7335d5d1e6"
+BOT_TOKEN = "8935782381:AAE1W7_NNhtOu1-0uJFFqLEQPkw8_dZJcsQ"
 
-BOT_TOKEN = "9037455170:AAGJhRwOQZfuxVIlPbkMa6nvUCDlK1mckQI"
-OWNER_ID = 8524222225                          
+# ==================== SETTINGS ====================
+OWNER_USERNAME = "@v099c"
+MOD_OWNER_USERNAME = "@v98c4"
 
-# Render Environment Variables ကနေ Session String တွေကို ယူမယ်
-SESSION_1 = os.environ.get("SESSION_1")
-SESSION_2 = os.environ.get("SESSION_2")
-SESSION_3 = os.environ.get("SESSION_3")
-SESSION_4 = os.environ.get("SESSION_4")
-SESSION_5 = os.environ.get("SESSION_5")
-SESSION_6 = os.environ.get("SESSION_6")
+# ⭐ ပြောင်းလဲထားသော Channel အသစ်များ
+CHANNEL_1 = "@Mango_Channel_1"
+CHANNEL_1_LINK = "https://t.me/Mango_Channel_1"
+CHANNEL_2 = "@Story_H346"
+CHANNEL_2_LINK = "https://t.me/Story_H346"
 
-# ============================================================
-# ၂။ Global State
-# ============================================================
-clients = []
-bot_client = None
-messages_cache = []
-ALLOWED_IDS = set()
-is_sending = False
-delay_time = 1.5  
-spam_task = None
+# Potato Mod Link (တိုက်ရိုက် ဖွင့်မည့် Link)
+POTATO_MOD_LINK = "https://t.me/Story_H346/51"
 
-AUTH_PASSWORD = "Yuta@21"
-AUTH_USERS = set()  
-WAITING_PASSWORD = set()  
+DB_FILE = "mango_bot.db"
 
-DB_PATH = "data.db"
 
-# ============================================================
-# ၃။ Database
-# ============================================================
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL
-            )"""
+# ==================== DATABASE ====================
+
+def init_db():
+    """Database နဲ့ Table ဖန်တီးခြင်း"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS verified_users (
+            user_id INTEGER PRIMARY KEY,
+            verified_at TEXT
         )
-        await db.execute(
-            """CREATE TABLE IF NOT EXISTS permissions (
-                user_id INTEGER PRIMARY KEY
-            )"""
-        )
-        await db.commit()
+    """)
+    conn.commit()
+    conn.close()
 
-async def reload_caches():
-    global messages_cache, ALLOWED_IDS
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id, content FROM messages ORDER BY id") as cur:
-            rows = await cur.fetchall()
-            messages_cache = [{"id": r[0], "content": r[1]} for r in rows]
 
-        async with db.execute("SELECT user_id FROM permissions") as cur:
-            rows = await cur.fetchall()
-            ALLOWED_IDS = {r[0] for r in rows}
+def save_verified(user_id):
+    """Join ပြီးသား User ကို သိမ်းဆည်းခြင်း"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO verified_users (user_id, verified_at)
+        VALUES (?, ?)
+    """, (user_id, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
 
-async def db_add_message(content: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT INTO messages (content) VALUES (?)", (content,))
-        await db.commit()
-    await reload_caches()
 
-async def db_del_message(msg_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM messages WHERE id = ?", (msg_id,))
-        await db.commit()
-    await reload_caches()
+# ==================== JOIN CHECK ====================
 
-async def db_add_permission(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO permissions (user_id) VALUES (?)", (user_id,)
-        )
-        await db.commit()
-    await reload_caches()
-
-async def db_del_permission(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM permissions WHERE user_id = ?", (user_id,))
-        await db.commit()
-    await reload_caches()
-
-# ============================================================
-# ၄။ Permission Check
-# ============================================================
-def is_allowed(user_id: int) -> bool:
-    return user_id == OWNER_ID or user_id in ALLOWED_IDS
-
-# ============================================================
-# ၅။ ခေတ်မီ Join Function
-# ============================================================
-async def safe_join_chat(client, link):
-    if "joinchat" in link or "/+" in link:
-        match = re.search(r'(?:\+|joinchat/)([a-zA-Z0-9_-]+)', link)
-        if match:
-            invite_hash = match.group(1)
-            await client(ImportChatInviteRequest(invite_hash))
-            return
-        else:
-            raise ValueError("Private Link ပုံစံ မမှန်ကန်ပါ")
-    else:
-        if link.startswith("https://t.me/"):
-            username = link.replace("https://t.me/", "").strip("/")
-        elif link.startswith("@"):
-            username = link.replace("@", "")
-        else:
-            username = link.strip()
-        await client(JoinChannelRequest(username))
-
-# ============================================================
-# ၆။ Bot Handler
-# ============================================================
-async def bot_handler(event):
-    global is_sending, spam_task, delay_time
-
-    user_id = event.sender_id
-    text = (event.raw_text or "").strip()
-    
-    is_privileged = is_allowed(user_id) or user_id in AUTH_USERS
-
-    if user_id != OWNER_ID and not is_privileged:
-        if event.is_group:
-            return  
-            
-        if user_id in WAITING_PASSWORD:
-            if text == AUTH_PASSWORD:
-                AUTH_USERS.add(user_id)
-                WAITING_PASSWORD.remove(user_id)
-                await event.reply("✅ **Password မှန်ကန်ပါတယ်။** Bot ကို အသုံးပြုနိုင်ပါပြီ။\n\n👉 /help ရိုက်ပြီး အသုံးပြုနည်း ကြည့်နိုင်ပါတယ်။")
-            else:
-                await event.reply("❌ **Password မှားနေပါတယ်။** ပြန်လည်ကြိုးစားပါ။")
-            return
-
-        if user_id not in AUTH_USERS:
-            WAITING_PASSWORD.add(user_id)
-            if event.is_private:
-                await event.reply("🔒 **Bot အသုံးပြုရန် Password ထည့်ပါ:**")
-            return
-
-    if not is_privileged:
-        return
-
-    if not text:
-        return
-
-    if is_sending and not is_privileged:
-        return
-
-    # ---------- /setmsg ----------
-    if text.startswith("/setmsg "):
-        content = text.split(" ", 1)[1].strip()
-        if not content:
-            await event.reply("စာသား ထည့်ပါ")
-            return
-        await db_add_message(content)
-        await event.reply(f"✅ ထည့်ပြီး ({len(messages_cache)} ခု)")
-
-    # ---------- /delmsg ----------
-    elif text.startswith("/delmsg "):
+async def check_joined(context, user_id):
+    """User က Channel ၂ ခုလုံး Join ထား/မထား စစ်ဆေးခြင်း"""
+    not_joined = []
+    for channel in [CHANNEL_1, CHANNEL_2]:
         try:
-            msg_id = int(text.split(" ", 1)[1].strip())
-        except (IndexError, ValueError):
-            await event.reply("ID မှန်ကန်စွာ ထည့်ပါ")
-            return
-        await db_del_message(msg_id)
-        await event.reply(f"🗑 ဖျက်ပြီး ({len(messages_cache)} ခု ကျန်)")
-
-    # ---------- /list ----------
-    elif text == "/list":
-        if not messages_cache:
-            await event.reply("စာသား မရှိပါ")
-            return
-        lines = ["📝 **Messages**\n"]
-        for m in messages_cache:
-            preview = m["content"][:60]
-            lines.append(f"{m['id']}. {preview}")
-        await event.reply("\n".join(lines))
-
-    # ---------- /permission ----------
-    elif text.startswith("/permission "):
-        try:
-            uid = int(text.split(" ", 1)[1].strip())
-        except (IndexError, ValueError):
-            await event.reply("ID မှန်ကန်စွာ ထည့်ပါ")
-            return
-        await db_add_permission(uid)
-        await event.reply(f"✅ {uid} ခွင့်ပြုပြီး")
-
-    # ---------- /removepermission ----------
-    elif text.startswith("/removepermission "):
-        try:
-            uid = int(text.split(" ", 1)[1].strip())
-        except (IndexError, ValueError):
-            await event.reply("ID မှန်ကန်စွာ ထည့်ပါ")
-            return
-        await db_del_permission(uid)
-        await event.reply(f"🗑 {uid} ဖယ်ပြီး")
-
-    # ---------- /time ----------
-    elif text.startswith("/time "):
-        try:
-            sec = float(text.split(" ", 1)[1].strip())
-        except (IndexError, ValueError):
-            await event.reply("အချိန် (sec) မှန်ကန်စွာ ထည့်ပါ")
-            return
-        delay_time = sec
-        await event.reply(f"⏱ Delay = {delay_time}s")
-
-    # ---------- /active ----------
-    elif text == "/active":
-        if not clients:
-            await event.reply("Account မရှိပါ")
-            return
-        lines = ["🟢 **Accounts**\n"]
-        for i, c in enumerate(clients, 1):
-            try:
-                me = await c.get_me()
-                lines.append(f"{i}. {me.first_name} (@{me.username or 'N/A'})")
-            except Exception as e:
-                lines.append(f"{i}. ❌ {e}")
-        await event.reply("\n".join(lines))
-
-    # ---------- /status ----------
-    elif text == "/status":
-        await event.reply(
-            f"📊 **Status**\n"
-            f"Sending: {is_sending}\n"
-            f"Messages: {len(messages_cache)}\n"
-            f"Delay: {delay_time}s\n"
-            f"Allowed: {len(ALLOWED_IDS)}\n"
-            f"Accounts: {len(clients)}"
-        )
-
-    # ---------- /help ----------
-    elif text in ["/help", "/start"]:
-        await event.reply(
-            "🤖 **Bot Commands များ**\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "📝 **/setmsg** `<စာသား>`\n"
-            "• နင်းရန် စာသားအသစ် ထည့်ရန်\n"
-            "• (HTML Format သုံးလို့ရပါတယ်)\n\n"
-            "🗑 **/delmsg** `<id>`\n"
-            "• ထည့်ထားသော စာသားကို ဖျက်ရန်\n\n"
-            "📋 **/list**\n"
-            "• ထည့်ထားသော စာသားများ ကြည့်ရန်\n\n"
-            "🔑 **/permission** `<id>`\n"
-            "• သူငယ်ချင်းများကို ခွင့်ပြုရန်\n\n"
-            "🚫 **/removepermission** `<id>`\n"
-            "• ခွင့်ပြုချက် ပြန်ဖယ်ရန်\n\n"
-            "⏱ **/time** `<sec>`\n"
-            "• စာပို့မည့် အချိန်ခြားရန် (ဥပမာ- /time 1)\n\n"
-            "👥 **/active**\n"
-            "• အသုံးပြုနေသော အကောင့်များ ကြည့်ရန်\n\n"
-            "📊 **/status**\n"
-            "• Bot ၏ အခြေအနေ ကြည့်ရန်\n\n"
-            "🔗 **/join** `<link>`\n"
-            "• Group သို့ အကောင့်အားလုံး ဝင်ရန်\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "🔥 **fight** (reply ဖြင့်)\n"
-            "• စတင် နင်းရန်\n\n"
-            "🛑 **ရပ်**\n"
-            "• နင်းနေခြင်းကို ရပ်ရန်\n\n"
-            "🧹 **မထန်နဲ့**\n"
-            "• စာသားအားလုံး ရှင်းရန်"
-        )
-
-    # ---------- /join ----------
-    elif text.startswith("/join "):
-        link = text.split(" ", 1)[1].strip()
-        await event.reply("⏳ ဝင်နေတယ်...")
-
-        results = []
-
-        if bot_client and bot_client.is_connected():
-            try:
-                await safe_join_chat(bot_client, link)
-                results.append("✅ Bot OK")
-            except UserAlreadyParticipantError:
-                results.append("ℹ️ Bot ရှိပြီးသား")
-            except Exception as e:
-                results.append(f"❌ Bot: {e}")
-        else:
-            results.append("❌ Bot မချိတ်ထား")
-
-        for i, client in enumerate(clients, 1):
-            try:
-                await safe_join_chat(client, link)
-                results.append(f"✅ Acc{i} OK")
-            except UserAlreadyParticipantError:
-                results.append(f"ℹ️ Acc{i} ရှိပြီးသား")
-            except FloodWaitError as e:
-                results.append(f"⏳ Acc{i} FloodWait {e.seconds}s")
-                await asyncio.sleep(e.seconds)
-                try:
-                    await safe_join_chat(client, link)
-                    results.append(f"✅ Acc{i} OK (retry)")
-                except Exception as e2:
-                    results.append(f"❌ Acc{i} retry: {e2}")
-            except Exception as e:
-                results.append(f"❌ Acc{i}: {e}")
-            await asyncio.sleep(1.5)
-
-        await event.reply("\n".join(results))
-
-    # ---------- ရပ် ----------
-    elif text == "ရပ်":
-        is_sending = False
-        if spam_task and not spam_task.done():
-            spam_task.cancel()
-        await event.reply("ဟုတ်ကဲ့ သခင်")
-
-    # ---------- မထန်နဲ့ ----------
-    elif text == "မထန်နဲ့":
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM messages")
-            await db.commit()
-        await reload_caches()
-        await event.reply("🗑 Messages အားလုံး ရှင်းပြီး")
-
-    # ---------- fight ----------
-    elif text in ["ဖင်ချလိုက်", "ဖိုက်", "နင်း", "လုပ်လိုက်စမ်း", "fight"]:
-        if not event.is_reply:
-            await event.reply("ဘယ်သူ့ကိုလဲ (reply လုပ်ပါ)")
-            return
-        if not messages_cache:
-            await event.reply("အရင် /setmsg နဲ့ စာသား ထည့်ပါ")
-            return
-        if is_sending:
-            await event.reply("ရပ်တာမလား သခင်လေး")
-            return
-
-        reply_msg = await event.get_reply_message()
-        target = reply_msg.sender
-        target_name = target.first_name or "သူငယ်ချင်း"
-
-        is_sending = True
-        await event.reply(f"🔥 {target_name} ကို နင်းမယ်...")
-        spam_task = asyncio.create_task(
-            start_spamming(event.chat_id, target.id, target_name)
-        )
-
-# ============================================================
-# ၇။ Spam Loop
-# ============================================================
-async def start_spamming(chat_id, target_id, target_name):
-    global is_sending, messages_cache, delay_time
-    idx = 0
-
-    try:
-        while is_sending:
-            if not messages_cache:
-                break
-
-            for client in clients:
-                if not is_sending:
-                    break
-
-                for _ in range(3):
-                    if not is_sending or not messages_cache:
-                        break
-
-                    if idx >= len(messages_cache):
-                        idx = 0
-                    content = messages_cache[idx]["content"]
-                    idx += 1
-
-                    try:
-                        await client.send_message(
-                            chat_id,
-                            f"{content} {target_name}",
-                            parse_mode='html'
-                        )
-                        print(f"✅ {content} {target_name}")
-                        await asyncio.sleep(delay_time)
-                    except FloodWaitError as e:
-                        print(f"⏳ FloodWait {e.seconds}s")
-                        await asyncio.sleep(e.seconds)
-                    except Exception as e:
-                        print(f"❌ {e}")
-
-                await asyncio.sleep(0.1)
-
-            if is_sending:
-                await asyncio.sleep(0.5)
-    except asyncio.CancelledError:
-        print("Spam task cancelled")
-    finally:
-        is_sending = False
-
-# ============================================================
-# ၈။ Web Server (Render အတွက်)
-# ============================================================
-async def handle(request):
-    return web.Response(text="Bot is running!")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"✅ Web server started on port {port}")
-
-# ============================================================
-# ၉။ Main
-# ============================================================
-async def main():
-    global bot_client
-
-    await start_web_server()
-
-    await init_db()
-    print("✅ Database ready")
-
-    await reload_caches()
-    print(f"Loaded: {len(messages_cache)} msgs, {len(ALLOWED_IDS)} allowed")
-
-    accounts = [
-        (SESSION_1, API_ID_1, API_HASH_1, "Account 1"),
-        (SESSION_2, API_ID_2, API_HASH_2, "Account 2"),
-        (SESSION_3, API_ID_3, API_HASH_3, "Account 3"),
-        (SESSION_4, API_ID_4, API_HASH_4, "Account 4"),
-        (SESSION_5, API_ID_5, API_HASH_5, "Account 5"),
-        (SESSION_6, API_ID_6, API_HASH_6, "Account 6")
-    ]
-
-    for session_str, api_id, api_hash, acc_name in accounts:
-        if not session_str:
-            print(f"❌ {acc_name}: Session String Not Found in Environment Variables.")
-            continue
-        try:
-            print(f"⏳ Trying to start {acc_name}...")
-            client = TelegramClient(StringSession(session_str), api_id, api_hash)
-            await client.start()
-                
-            clients.append(client)
-            me = await client.get_me()
-            print(f"✅ {acc_name} → {me.first_name}")
-            
-            # အကောင့်တွေကြား တစ်စက္ကန့် ခြားပါ (Flood မမိအောင်)
-            await asyncio.sleep(1)
+            member = await context.bot.get_chat_member(channel, user_id)
+            if member.status in ["left", "kicked"]:
+                not_joined.append(channel)
         except Exception as e:
-            print(f"❌ {acc_name} fail: {e}")
+            print(f"Channel check error ({channel}): {e}")
+            not_joined.append(channel)
+    return not_joined
 
-    bot_client = TelegramClient("bot_session", API_ID_1, API_HASH_1)
-    await bot_client.start(bot_token=BOT_TOKEN)
-    bot_client.add_event_handler(
-        bot_handler,
-        events.NewMessage(incoming=True),
+
+# ==================== MESSAGE FUNCTIONS ====================
+
+async def send_new_message(query, text, reply_markup=None, disable_preview=False):
+    """Message အသစ် ပို့ခြင်း (အဟောင်း မပျောက်စေရ)
+    parse_mode လုံးဝ မသုံးပါ (Error မတက်စေရ)"""
+    try:
+        await query.message.reply_text(
+            text=text,
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_preview,
+        )
+    except Exception as e:
+        print(f"Send error: {e}")
+
+
+# ==================== START COMMAND ====================
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start နှိပ်ရင် ရွေးချယ်စရာများ ပြသခြင်း"""
+    
+    keyboard = [
+        [InlineKeyboardButton("👑 Bot Owner", callback_data="bot_owner")],
+        [InlineKeyboardButton("📥 Mod ဒေါင်းလုပ်", callback_data="download_mod")],
+        [InlineKeyboardButton("🛡️ Mod Owner", callback_data="mod_owner")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = (
+        "🤖 မင်္ဂလာပါ! Bot မှ ကြိုဆိုပါတယ်။\n\n"
+        "အောက်ပါ ရွေးချယ်စရာများထဲမှ တစ်ခုကို နှိပ်ပါ-\n\n"
+        "👑 Bot Owner - Bot ပိုင်ရှင်ကို ဆက်သွယ်ရန်\n"
+        "📥 Mod ဒေါင်းလုပ် - Mod များ ဒေါင်းလုပ် ရယူရန်\n"
+        "🛡️ Mod Owner - Mod ပိုင်ရှင်ကို ဆက်သွယ်ရန်"
     )
-    print("✅ Bot started")
+    
+    await update.message.reply_text(text, reply_markup=reply_markup)
 
-    await bot_client.run_until_disconnected()
+
+# ==================== CALLBACK HANDLER ====================
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inline Button နှိပ်တိုင်း ကိုင်တွယ်ခြင်း"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # ========== Bot Owner ==========
+    if query.data == "bot_owner":
+        text = (
+            "👑 Bot Owner\n\n"
+            "Bot ပိုင်ရှင်နှင့် ဆက်သွယ်ရန်-\n\n"
+            f"📩 {OWNER_USERNAME}"
+        )
+        await send_new_message(query, text)
+        return
+    
+    # ========== Mod Owner ==========
+    if query.data == "mod_owner":
+        text = (
+            "🛡️ Mod Owner\n\n"
+            "Mod ပိုင်ရှင်နှင့် ဆက်သွယ်ရန်-\n\n"
+            f"📩 {MOD_OWNER_USERNAME}"
+        )
+        await send_new_message(query, text)
+        return
+    
+    # ========== Mod ဒေါင်းလုပ် ==========
+    if query.data == "download_mod":
+        not_joined = await check_joined(context, user_id)
+        
+        if not_joined:
+            # Join မလုပ်ရသေးရင် Error ပြသ
+            keyboard = [
+                [InlineKeyboardButton("📢 Channel 1 Join", url=CHANNEL_1_LINK)],
+                [InlineKeyboardButton("📢 Channel 2 Join", url=CHANNEL_2_LINK)],
+                [InlineKeyboardButton("✅ Join ပြီးပါပြီ - စစ်ဆေးမည်", callback_data="check_join")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            text = (
+                "⚠️ Error!\n\n"
+                "Mod ဒေါင်းလုပ် ရယူရန် အောက်ပါ Channel ၂ ခုလုံးကို "
+                "အရင်ဆုံး Join ပေးပါ။\n\n"
+                f"1️⃣ Channel 1: {CHANNEL_1}\n"
+                f"2️⃣ Channel 2: {CHANNEL_2}\n\n"
+                "Join ပြီးရင် 'Join ပြီးပါပြီ - စစ်ဆေးမည်' ကို နှိပ်ပါ။"
+            )
+            await send_new_message(query, text, reply_markup)
+        else:
+            # Join ပြီးသားဆိုရင် ကျေးဇူးတင်စာ ပြသ
+            save_verified(user_id)
+            await show_download_page(query)
+        return
+    
+    # ========== Join စစ်ဆေးခြင်း ==========
+    if query.data == "check_join":
+        not_joined = await check_joined(context, user_id)
+        
+        if not_joined:
+            keyboard = [
+                [InlineKeyboardButton("📢 Channel 1 Join", url=CHANNEL_1_LINK)],
+                [InlineKeyboardButton("📢 Channel 2 Join", url=CHANNEL_2_LINK)],
+                [InlineKeyboardButton("✅ Join ပြီးပါပြီ - စစ်ဆေးမည်", callback_data="check_join")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            missing = ""
+            if CHANNEL_1 in not_joined:
+                missing += f"❌ Channel 1 ({CHANNEL_1}) ကို မဖောက်ရသေးပါ\n"
+            if CHANNEL_2 in not_joined:
+                missing += f"❌ Channel 2 ({CHANNEL_2}) ကို မဖောက်ရသေးပါ\n"
+            
+            text = (
+                "⚠️ Error!\n\n"
+                "Channel ၂ ခုလုံး Join မဖြစ်သေးပါဘူး။\n\n"
+                f"{missing}\n"
+                "ပြန်လည် Join ပြီး ထပ်စစ်ပါ။"
+            )
+            await send_new_message(query, text, reply_markup)
+        else:
+            save_verified(user_id)
+            await show_download_page(query)
+        return
+
+
+async def show_download_page(query):
+    """Mod ဒေါင်းလုပ် စာမျက်နှာ ပြသခြင်း"""
+    text = (
+        "✅ ကျေးဇူးတင်ပါသည်!\n\n"
+        "သင်သည် အောင်မြင်စွာ Join ပြီးပါပြီ။\n\n"
+        "🥔 Potato Mod အား စတင်ဒေါင်းလို့ရပါပြီ။\n\n"
+        "အောက်ပါ ခလုတ်ကို နှိပ်ပြီး ဒေါင်းလုပ်ပါ-"
+    )
+    # ⭐ url= သုံးထားတဲ့အတွက် နှိပ်လိုက်တာနဲ့ တိုက်ရိုက် Link ဖွင့်သွားမည်
+    keyboard = [
+        [InlineKeyboardButton("📥 Potato Mod ဒေါင်းလုပ်", url=POTATO_MOD_LINK)],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await send_new_message(query, text, reply_markup, disable_preview=True)
+
+
+# ==================== AUTO REPLY (ဖျက်ထားပြီး) ====================
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Auto Reply များ အားလုံး ဖျက်ထားပါသည်"""
+    pass
+
+
+# ==================== MAIN ====================
+
+def main():
+    init_db()
+    
+    print("=" * 40)
+    print("Bot စတင်နေပါသည်...")
+    print(f"Channel 1: {CHANNEL_1}")
+    print(f"Channel 2: {CHANNEL_2}")
+    print("=" * 40)
+    
+    retry_count = 0
+    
+    while True:
+        try:
+            # Application အသစ် တည်ဆောက်ခြင်း (တစ်ခါ run တိုင်း အသစ်)
+            app = Application.builder().token(BOT_TOKEN).build()
+            
+            app.add_handler(CommandHandler("start", start_command))
+            app.add_handler(CallbackQueryHandler(button_handler))
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            
+            retry_count = 0
+            print(f"✅ Bot လည်ပတ်နေပါသည်... ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
+            
+            # Bot ရပ်သွားတဲ့အထိ run နေမယ်
+            app.run_polling(drop_pending_updates=True)
+            
+        except Exception as e:
+            retry_count += 1
+            print(f"❌ Error တက်ပါသည်: {e}")
+            print(f"🔄 ၅ စက္ကန့်နေပြီး ပြန် Run မည်... (အကြိမ် {retry_count})")
+            time.sleep(5)
+            continue
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
